@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "mirscribe-dashboard"
+version = "0.1.0"
+description = ""
+authors = ["tasbasmn <nazifts@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandas = "^2.2.3"
+streamlit = "^1.44.1"
+matplotlib = "^3.10.1"
+seaborn = "^0.13.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
