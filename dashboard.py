@@ -1,10 +1,16 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import networkx as nx
 from pyvis.network import Network
 import tempfile
 import os
+import numpy as np
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Patch
+from matplotlib.colors import ListedColormap, PowerNorm
 
 # load data
 @st.cache_data
@@ -22,15 +28,20 @@ if 'filters' not in st.session_state:
         'mirna_family': "All",
         'gene_type': "All",
         'is_cancer_promoting': "All",
-        'triplet_behavior': "All"
+        'triplet_behavior': "All",
+        'gene_name': "All"
     }
 
 # Initialize show_network if not present
 if 'show_network' not in st.session_state:
     st.session_state.show_network = False
 
+# Initialize show_heatmap if not present
+if 'show_heatmap' not in st.session_state:
+    st.session_state.show_heatmap = False
+
 # Initialize reset flags if not present
-for filter_name in list(st.session_state.filters.keys()) + ['gene_query', 'all_filters']:
+for filter_name in list(st.session_state.filters.keys()) + ['all_filters']:
     reset_key = f"reset_{filter_name}"
     if reset_key not in st.session_state:
         st.session_state[reset_key] = False
@@ -39,8 +50,6 @@ for filter_name in list(st.session_state.filters.keys()) + ['gene_query', 'all_f
 if st.session_state.reset_all_filters:
     for key in st.session_state.filters:
         st.session_state.filters[key] = "All"
-    if 'gene_query_input' in st.session_state:
-        st.session_state.gene_query_input = ""
     st.session_state.reset_all_filters = False
 
 for filter_name in st.session_state.filters.keys():
@@ -48,11 +57,6 @@ for filter_name in st.session_state.filters.keys():
     if st.session_state[reset_key]:
         st.session_state.filters[filter_name] = "All"
         st.session_state[reset_key] = False
-
-if st.session_state.reset_gene_query:
-    if 'gene_query_input' in st.session_state:
-        st.session_state.gene_query_input = ""
-    st.session_state.reset_gene_query = False
 
 # Sidebar for filters
 st.sidebar.header("Filters")
@@ -72,9 +76,6 @@ def add_counts_to_options(df, column_name, current_filters=None):
             if filter_value != "All" and filter_name != column_name:
                 if filter_name == 'is_cancer_promoting':
                     filtered_df = filtered_df[filtered_df[filter_name].astype(str) == filter_value]
-                elif filter_name == 'gene_query':
-                    if 'gene_query_input' in st.session_state and st.session_state.gene_query_input:
-                        filtered_df = filtered_df[filtered_df["gene_name"].str.lower().str.contains(st.session_state.gene_query_input.lower())]
                 else:
                     filtered_df = filtered_df[filtered_df[filter_name] == filter_value]
     else:
@@ -103,6 +104,7 @@ mirna_family_options = add_counts_to_options(df, "mirna_family", st.session_stat
 gene_type_options = add_counts_to_options(df, "gene_type", st.session_state.filters)
 cancer_promoting_options = add_counts_to_options(df, "is_cancer_promoting", st.session_state.filters)
 triplet_behavior_options = add_counts_to_options(df, "triplet_behavior", st.session_state.filters)
+gene_name_options = add_counts_to_options(df, "gene_name", st.session_state.filters)
 
 # Find the index of the selected option in each dropdown
 def find_index(options, value):
@@ -113,8 +115,8 @@ def find_index(options, value):
             return i
     return 0  # Default to "All" if not found
 
-# Create a dropdown with an inline reset button
-def filter_with_reset_inline(label, options, session_key, filter_name, index):
+# Create a dropdown with an inline reset button and search
+def filter_with_search_reset(label, options, session_key, filter_name, index):
     # Create a container for the entire component
     container = st.sidebar.container()
     
@@ -123,11 +125,29 @@ def filter_with_reset_inline(label, options, session_key, filter_name, index):
     col1.markdown(f"**{label}**")
     reset_button = col2.button("↻", key=f"reset_button_{filter_name}", help="Reset this filter")
     
+    # Add a search box for filtering options
+    search_term = container.text_input(
+        "Search", 
+        key=f"search_{filter_name}",
+        placeholder=f"Search {label.split(' ')[0].lower()}...",
+        label_visibility="collapsed"
+    )
+    
+    # Filter options based on search term
+    if search_term:
+        filtered_options = [opt for opt in options if search_term.lower() in opt.lower()]
+        # Always keep "All" option
+        if "All" not in filtered_options and "All" in options:
+            filtered_options = ["All"] + filtered_options
+        display_options = filtered_options if filtered_options else options
+    else:
+        display_options = options
+    
     # Add the dropdown below (full width)
     selected = container.selectbox(
         "",  # Empty label since we already showed it above
-        options,
-        index=index,
+        display_options,
+        index=min(index, len(display_options)-1) if display_options else 0,
         key=session_key,
         on_change=lambda: update_filters(filter_name, st.session_state[session_key]),
         label_visibility="collapsed"  # Hide the label completely
@@ -140,8 +160,8 @@ def filter_with_reset_inline(label, options, session_key, filter_name, index):
         
     return selected
 
-# Dropdown filters with counts and reset buttons
-selected_signature = filter_with_reset_inline(
+# Dropdown filters with counts, search and reset buttons
+selected_signature = filter_with_search_reset(
     f"Mutation Signature ({len(mutation_signature_options)-1})",
     mutation_signature_options,
     "mutation_signature_select",
@@ -149,7 +169,7 @@ selected_signature = filter_with_reset_inline(
     find_index(mutation_signature_options, st.session_state.filters['mutation_signature'])
 )
 
-selected_mirna = filter_with_reset_inline(
+selected_mirna = filter_with_search_reset(
     f"miRNA Family ({len(mirna_family_options)-1})",
     mirna_family_options,
     "mirna_family_select",
@@ -157,7 +177,7 @@ selected_mirna = filter_with_reset_inline(
     find_index(mirna_family_options, st.session_state.filters['mirna_family'])
 )
 
-selected_gene_type = filter_with_reset_inline(
+selected_gene_type = filter_with_search_reset(
     f"Gene Type ({len(gene_type_options)-1})",
     gene_type_options,
     "gene_type_select",
@@ -165,7 +185,7 @@ selected_gene_type = filter_with_reset_inline(
     find_index(gene_type_options, st.session_state.filters['gene_type'])
 )
 
-selected_cancer_promoting = filter_with_reset_inline(
+selected_cancer_promoting = filter_with_search_reset(
     "Cancer Promoting (2)",
     cancer_promoting_options,
     "is_cancer_promoting_select",
@@ -173,7 +193,7 @@ selected_cancer_promoting = filter_with_reset_inline(
     find_index(cancer_promoting_options, st.session_state.filters['is_cancer_promoting'])
 )
 
-selected_behavior = filter_with_reset_inline(
+selected_behavior = filter_with_search_reset(
     f"Triplet Behavior ({len(triplet_behavior_options)-1})",
     triplet_behavior_options,
     "triplet_behavior_select",
@@ -181,31 +201,27 @@ selected_behavior = filter_with_reset_inline(
     find_index(triplet_behavior_options, st.session_state.filters['triplet_behavior'])
 )
 
-# Text search with reset button
-st.sidebar.header("Text Search")
-
-# Create a container for the search
-search_container = st.sidebar.container()
-search_col1, search_col2 = search_container.columns([5, 1])
-search_col1.markdown("**Search by Gene Name**")
-reset_search_button = search_col2.button("↻", key="reset_button_gene_query", help="Clear search")
-
-gene_query = search_container.text_input(
-    "",  # Empty label since we already showed it above
-    key="gene_query_input",
-    on_change=lambda: update_filters('gene_query', st.session_state.gene_query_input),
-    label_visibility="collapsed"  # Hide the label completely
+# Gene name dropdown with search
+selected_gene = filter_with_search_reset(
+    f"Gene Name ({len(gene_name_options)-1})",
+    gene_name_options,
+    "gene_name_select",
+    "gene_name",
+    find_index(gene_name_options, st.session_state.filters['gene_name'])
 )
 
-# Handle search reset button click
-if reset_search_button:
-    st.session_state.reset_gene_query = True
-    st.rerun()
-
-# Network plot button
+# Visualization buttons
 st.sidebar.markdown("---")
-if st.sidebar.button("Plot Interactive Network", type="secondary"):
-    st.session_state.show_network = not st.session_state.show_network
+st.sidebar.header("Visualizations")
+vis_col1, vis_col2 = st.sidebar.columns(2)
+
+with vis_col1:
+    if st.button("Network Graph", type="secondary", use_container_width=True):
+        st.session_state.show_network = not st.session_state.show_network
+
+with vis_col2:
+    if st.button("Heatmap", type="secondary", use_container_width=True):
+        st.session_state.show_heatmap = not st.session_state.show_heatmap
 
 # Reset all filters button
 st.sidebar.markdown("---")
@@ -219,6 +235,7 @@ actual_mirna = extract_value(selected_mirna)
 actual_gene_type = extract_value(selected_gene_type)
 actual_cancer_promoting = extract_value(selected_cancer_promoting)
 actual_behavior = extract_value(selected_behavior)
+actual_gene = extract_value(selected_gene)
 
 # Apply all filters to get the final dataframe
 filtered_df = df.copy()
@@ -239,9 +256,8 @@ if actual_cancer_promoting != "All":
 if actual_behavior != "All":
     filtered_df = filtered_df[filtered_df["triplet_behavior"] == actual_behavior]
 
-# Apply text search
-if gene_query:
-    filtered_df = filtered_df[filtered_df["gene_name"].str.lower().str.contains(gene_query.lower())]
+if actual_gene != "All":
+    filtered_df = filtered_df[filtered_df["gene_name"] == actual_gene]
 
 # Main content area - Results
 st.header("Results")
@@ -251,6 +267,270 @@ if filtered_df.empty:
 else:
     st.success(f"{len(filtered_df)} results found.")
     st.dataframe(filtered_df)
+    
+    # Heatmap visualization
+    if st.session_state.show_heatmap:
+        st.header("Signature-Gene Heatmap")
+        
+        with st.expander("Heatmap Options", expanded=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                top_n_genes = st.slider("Number of Top Genes", min_value=10, max_value=50, value=30)
+            with col2:
+                # Get the unique signatures to select from
+                available_sigs = sorted(filtered_df["mutation_signature"].unique().tolist())
+                all_sigs = st.multiselect(
+                    "Mutation Signatures to Include",
+                    options=available_sigs,
+                    default=available_sigs[:min(12, len(available_sigs))]
+                )
+                if not all_sigs:  # If none selected, use all available
+                    all_sigs = available_sigs
+                    
+        # Function to plot heatmap
+        def plot_signature_gene_heatmap(df, top_n_genes=30, all_signatures=None):
+            # --- preprocess ---
+            data = (
+                df.groupby(['gene_name', 'mutation_signature'])
+                .agg({
+                    'total_hits': 'sum',
+                    'stats_log2fc_mean': 'mean',
+                    'gene_type': 'first',
+                    'mirna_family': pd.Series.nunique
+                })
+                .reset_index()
+            )
+
+            # use full list of signatures if provided
+            if all_signatures is None or len(all_signatures) == 0:
+                all_sigs = sorted(df["mutation_signature"].unique())
+            else:
+                all_sigs = all_signatures
+
+            # build full matrix and include all signatures
+            full_matrix = data.pivot(index='gene_name', columns='mutation_signature', values='total_hits').fillna(0)
+            # Ensure all selected signatures are included (might not all be in the filtered data)
+            full_matrix = full_matrix.reindex(columns=all_sigs, fill_value=0)
+
+            # select top genes by total hits
+            top_genes = full_matrix.sum(axis=1).nlargest(top_n_genes).index
+            if len(top_genes) == 0:
+                st.warning("No genes found with these filters.")
+                return None
+                
+            heatmap_df = full_matrix.loc[top_genes]
+
+            # get gene role
+            gene_type_map = (
+                data.drop_duplicates('gene_name')
+                .set_index('gene_name')['gene_type']
+                .reindex(heatmap_df.index)
+                .fillna('Unannotated')
+            )
+
+            role_priority = {
+                'Oncogene': 0,
+                'DualRole': 1,
+                'TumorSuppressor': 2,
+                'Unannotated': 3
+            }
+            gene_sort_key = gene_type_map.map(role_priority)
+            sorted_genes = gene_sort_key.sort_values().index
+            heatmap_df = heatmap_df.loc[sorted_genes]
+
+            gene_fc = (
+                data[data['gene_name'].isin(sorted_genes)]
+                .groupby('gene_name')['stats_log2fc_mean']
+                .mean()
+                .reindex(sorted_genes)
+            )
+
+            gene_type = gene_type_map.loc[sorted_genes]
+
+            role_colors = {
+                'Oncogene': '#d95f02',
+                'TumorSuppressor': '#1b9e77',
+                'DualRole': '#7570b3',
+                'Unannotated': '#999999'
+            }
+            gene_colors = gene_type.map(role_colors).fillna('#999999')
+            fc_colors = ['green' if v > 0 else 'red' for v in gene_fc.values]
+
+            # --- highlight logic violations ---
+            highlight_mask = (
+                ((gene_type == "Oncogene") & (gene_fc > 0)) |
+                ((gene_type == "TumorSuppressor") & (gene_fc < 0))
+            )
+
+            highlight_genes = set(gene_fc[highlight_mask].index)
+
+            # --- compute signature net effect ---
+            sig_data = data[data['mutation_signature'].isin(heatmap_df.columns)]
+            sig_data['direction'] = np.where(sig_data['stats_log2fc_mean'] > 0, 'up', 'down')
+
+            sig_counts = (
+                sig_data
+                .groupby(['mutation_signature', 'direction'])
+                .size()
+                .unstack(fill_value=0)
+                .reindex(heatmap_df.columns, fill_value=0)
+            )
+
+            sig_counts['net'] = sig_counts.get('up', 0) - sig_counts.get('down', 0)
+            sig_counts['color'] = ['green' if x > 0 else 'red' for x in sig_counts['net']]
+            sig_net = sig_counts['net']
+
+            # --- layout ---
+            fig = plt.figure(figsize=(14, 10))
+            gs = GridSpec(
+                2, 4,
+                width_ratios=[1.0, 6, 0.15, 0.6],
+                height_ratios=[0.5, 5],
+                hspace=0.15,
+                wspace=0.4
+            )
+
+            # --- top-left: legend ---
+            ax_legend = fig.add_subplot(gs[0, 0])
+            ax_legend.axis('off')
+            legend_patches = [Patch(color=color, label=role) for role, color in role_colors.items()]
+            ax_legend.legend(
+                handles=legend_patches,
+                title='Gene Role',
+                loc='upper left',
+                bbox_to_anchor=(-0.1, 1.0),
+                frameon=False,
+                handlelength=1.0,
+                handleheight=0.8,
+                borderpad=0.3,
+                labelspacing=0.4,
+                title_fontsize='small',
+                fontsize='small'
+            )
+
+            # --- top: signature net effect ---
+            ax_top = fig.add_subplot(gs[0, 1])
+            if len(sig_net) > 0:
+                ymax = max(1, np.ceil(np.abs(sig_net).max() * 1.1)) if len(sig_net) > 0 else 1
+                yticks = np.linspace(-ymax, ymax, 5)
+                ax_top.bar(
+                    x=np.arange(len(sig_net)),
+                    height=sig_net.values,
+                    color=sig_counts['color'],
+                    edgecolor='black',
+                    linewidth=0.3
+                )
+                ax_top.axhline(0, color='black', linewidth=0.8, linestyle='--')
+                ax_top.set_ylim(-ymax, ymax)
+                ax_top.set_yticks(yticks)
+                ax_top.set_yticklabels([f"{y:.0f}" for y in yticks])
+                ax_top.set_xticks([])
+                ax_top.set_xlim(-0.5, len(sig_net) - 0.5)
+                ax_top.set_ylabel('Net Hits\n(+Up / -Down)')
+
+            # --- left: gene log2FC ---
+            ax_left = fig.add_subplot(gs[1, 0])
+            if len(gene_fc) > 0:
+                xmax = max(1, np.ceil(np.abs(gene_fc).max() * 1.1)) if len(gene_fc) > 0 else 1
+                xticks = np.linspace(-xmax, xmax, 5)
+                ax_left.barh(
+                    y=np.arange(len(gene_fc)),
+                    width=gene_fc.values,
+                    color=fc_colors,
+                    edgecolor='black',
+                    linewidth=0.3
+                )
+                ax_left.axvline(0, color='black', linewidth=0.8, linestyle='--')
+                ax_left.set_xlim(-xmax, xmax)
+                ax_left.set_xticks(xticks)
+                ax_left.set_xticklabels([f"{x:.1f}" for x in xticks])
+                ax_left.set_yticks([])
+                ax_left.set_ylim(-0.5, len(gene_fc) - 0.5)
+                ax_left.set_xlabel('log2FC')
+                ax_left.invert_yaxis()
+
+            # --- center: heatmap with perceptual scaling and cell labels ---
+            ax_heat = fig.add_subplot(gs[1, 1])
+            greens = plt.cm.Greens(np.linspace(0.05, 1, 256))
+            custom_colors = np.vstack([[1, 1, 1, 1], greens])
+            custom_cmap = ListedColormap(custom_colors)
+            
+            vmax = heatmap_df.values.max() if heatmap_df.values.max() > 0 else 1
+            norm = PowerNorm(gamma=0.4, vmin=0, vmax=vmax)
+
+            annot_strings = heatmap_df.copy()
+            annot_strings = annot_strings.applymap(lambda x: f"{int(x)}" if x != 0 else "")
+
+            heatmap = sns.heatmap(
+                heatmap_df,
+                cmap=custom_cmap,
+                norm=norm,
+                annot=annot_strings,
+                fmt='',
+                annot_kws={"size": 7},
+                ax=ax_heat,
+                cbar=False,
+                linewidths=0.5,
+                linecolor='#eeeeee'
+            )
+
+            ax_heat.set_xlabel('Mutation Signature')
+            ax_heat.set_ylabel('')
+            ax_heat.set_title('Mutation Density Across Genes and Signatures')
+            plt.sca(ax_heat)
+            plt.xticks(rotation=60, ha='right')
+            plt.yticks(rotation=0)
+
+            for ticklabel, gene in zip(ax_heat.get_yticklabels(), sorted_genes):
+                ticklabel.set_color(gene_colors[gene])
+                if gene in highlight_genes:
+                    ticklabel.set_backgroundcolor("#fde0dd")
+                    ticklabel.set_weight("bold")
+
+            # --- colorbar ---
+            ax_cbar = fig.add_subplot(gs[1, 2])
+            cbar = fig.colorbar(
+                heatmap.collections[0],
+                cax=ax_cbar,
+                orientation='vertical',
+                shrink=0.85
+            )
+            cbar.set_label('Total Hits')
+
+            plt.tight_layout()
+            return fig
+        
+        # Check if we have enough data
+        if len(filtered_df) > 0 and len(filtered_df['gene_name'].unique()) > 0:
+            fig = plot_signature_gene_heatmap(filtered_df, top_n_genes=top_n_genes, all_signatures=all_sigs)
+            if fig:
+                st.pyplot(fig)
+        else:
+            st.warning("Not enough data for heatmap visualization.")
+        
+        # Explanation of the heatmap
+        st.markdown("""
+        ### Heatmap Explanation
+        
+        **Center Heatmap**: Shows the distribution of hits across genes (rows) and mutation signatures (columns).
+        - Numbers in cells show the actual hit count
+        - Color intensity represents hit density (logarithmic scale)
+        
+        **Gene Labels**:
+        - **Oncogenes** (orange)
+        - **Tumor Suppressors** (green)
+        - **Dual Role** (purple)
+        - **Unannotated** (gray)
+        - **Bold highlighted** genes follow expected behavior (oncogenes upregulated, tumor suppressors downregulated)
+        
+        **Left Bar Chart**: Shows log2 fold change for each gene
+        - **Green**: Upregulated (positive log2FC)
+        - **Red**: Downregulated (negative log2FC)
+        
+        **Top Bar Chart**: Shows net effect of each signature
+        - Positive (green): More upregulating hits
+        - Negative (red): More downregulating hits
+        """)
     
     # Interactive Network visualization
     if st.session_state.show_network:
